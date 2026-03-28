@@ -40,6 +40,9 @@ const SPAWN_MAX = 5000
 const PATIENCE_TICK_MS = 100
 /** Max simulated seconds per patience tick (stall / background-tab safety). */
 const PATIENCE_DS_CAP = 1
+/** Frame-rate-independent smoothing for customer positions (matches x += (tx - x) * k). */
+const MOVE_LERP = 0.15
+const MOVE_SNAP_EPS = 0.85
 
 function randomPastel() {
   const hues = [0xff6b9d, 0x60a5fa, 0xa78bfa, 0x34d399, 0xfbbf24, 0xf472b6]
@@ -70,6 +73,9 @@ export class BaseLocationScene extends Phaser.Scene {
     this.staticRt = null
     this.patienceTimer = null
     this.lastPatienceTickMs = 0
+    this._serveCust = null
+    this._leavingCustomers = []
+    this._serveTimers = []
 
     this.drawScene()
     this.setupPatienceTick()
@@ -147,6 +153,9 @@ export class BaseLocationScene extends Phaser.Scene {
         this.staticRt.destroy()
         this.staticRt = null
       }
+      this.clearServeTimers()
+      this._serveCust = null
+      this._leavingCustomers = []
     })
 
     this.applyLayout()
@@ -181,14 +190,10 @@ export class BaseLocationScene extends Phaser.Scene {
       this.updatePatienceBar(cust)
       if (cust.patienceLeft <= 0) {
         this.queue.splice(i, 1)
-        this.tweens.add({
-          targets: cust.container,
-          x: cust.container.x - 120,
-          alpha: 0,
-          duration: 350,
-          ease: 'Sine.easeIn',
-          onComplete: () => cust.container.destroy(),
-        })
+        cust.state = 'leaving'
+        cust.targetX = cust.container.x - 120
+        cust.targetY = cust.container.y
+        this._leavingCustomers.push(cust)
         this.relayoutQueuePositions()
       }
     }
@@ -441,16 +446,6 @@ export class BaseLocationScene extends Phaser.Scene {
     cust.targetY = this.queueY
     cust.state = 'walk'
     this.queue.push(cust)
-    this.tweens.add({
-      targets: cust.container,
-      x: tx,
-      duration: 600 + slot * 80,
-      ease: 'Sine.easeOut',
-      onComplete: () => {
-        cust.state = 'queued'
-        this.updatePatienceBar(cust)
-      },
-    })
   }
 
   makeCustomer(x, y, patienceMax) {
@@ -511,14 +506,9 @@ export class BaseLocationScene extends Phaser.Scene {
 
   relayoutQueuePositions() {
     this.queue.forEach((cust, i) => {
-      if (cust.state !== 'queued') return
       const tx = this.queueBaseX + i * this.slotGap
-      this.tweens.add({
-        targets: cust.container,
-        x: tx,
-        duration: 220,
-        ease: 'Sine.easeOut',
-      })
+      cust.targetX = tx
+      cust.targetY = this.queueY
     })
   }
 
@@ -538,39 +528,43 @@ export class BaseLocationScene extends Phaser.Scene {
     const t2 = serveMs * 0.48
     const t3 = serveMs * 0.3
 
-    this.tweens.add({
-      targets: cust.container,
-      x: this.counterX,
-      y: this.counterY - 8,
-      duration: t1,
-      ease: 'Sine.easeOut',
-      onComplete: () => {
-        this.flashServeGlow(t2)
-      },
-    })
+    this.clearServeTimers()
+    cust._servePhase = 'toCounter'
+    cust.targetX = this.counterX
+    cust.targetY = this.counterY - 8
+    this._serveCust = cust
 
-    this.time.delayedCall(t1 + t2, () => {
-      const value = this.coinValue()
-      this.tweens.add({
-        targets: cust.container,
-        x: this.pickupX,
-        y: this.pickupY,
-        duration: t3,
-        ease: 'Sine.easeInOut',
-        onComplete: () => {
-          this.spawnCoinBag(this.pickupX, this.pickupY - 40, value)
-          this.tweens.add({
-            targets: cust.container,
-            alpha: 0,
-            duration: 200,
-            onComplete: () => {
-              cust.container.destroy()
-            },
-          })
-          this.serving = false
-        },
-      })
-    })
+    this._serveTimers.push(
+      this.time.delayedCall(t1, () => {
+        if (this._serveCust !== cust || !cust.container?.active) return
+        const cont = cust.container
+        cont.x = this.counterX
+        cont.y = this.counterY - 8
+        this.flashServeGlow(t2)
+        cust._servePhase = 'glowWait'
+      }),
+    )
+    this._serveTimers.push(
+      this.time.delayedCall(t1 + t2, () => {
+        if (this._serveCust !== cust || !cust.container?.active) return
+        cust._servePhase = 'toPickup'
+        cust.targetX = this.pickupX
+        cust.targetY = this.pickupY
+      }),
+    )
+    this._serveTimers.push(
+      this.time.delayedCall(t1 + t2 + t3, () => {
+        if (this._serveCust !== cust || !cust.container?.active) return
+        const cont = cust.container
+        cont.x = this.pickupX
+        cont.y = this.pickupY
+        const value = this.coinValue()
+        this.spawnCoinBag(this.pickupX, this.pickupY - 40, value)
+        this.serving = false
+        cust._servePhase = 'fadeOut'
+        this.clearServeTimers()
+      }),
+    )
   }
 
   flashServeGlow(duration) {
@@ -578,16 +572,87 @@ export class BaseLocationScene extends Phaser.Scene {
     g.clear()
     g.fillStyle(0xfef08a, 0.45)
     g.fillCircle(this.counterX, this.counterY - 10, 48)
-    this.tweens.add({
-      targets: g,
-      alpha: 1,
-      duration: duration * 0.35,
-      yoyo: true,
-      onComplete: () => {
-        g.clear()
+    g.setAlpha(1)
+    this.time.delayedCall(duration, () => {
+      if (g?.active) {
         g.setAlpha(0)
-      },
+        g.clear()
+      }
     })
+  }
+
+  clearServeTimers() {
+    if (this._serveTimers?.length) {
+      this._serveTimers.forEach((t) => t.remove())
+      this._serveTimers = []
+    }
+  }
+
+  lerpToward(current, target, k) {
+    return current + (target - current) * k
+  }
+
+  lerpContainerToward(container, targetX, targetY, k) {
+    container.x = this.lerpToward(container.x, targetX, k)
+    container.y = this.lerpToward(container.y, targetY, k)
+  }
+
+  isNearXY(x, y, tx, ty) {
+    return (
+      Math.abs(x - tx) < MOVE_SNAP_EPS && Math.abs(y - ty) < MOVE_SNAP_EPS
+    )
+  }
+
+  update() {
+    if (this.modalBlock) return
+    const k = MOVE_LERP
+
+    for (let j = this._leavingCustomers.length - 1; j >= 0; j--) {
+      const cust = this._leavingCustomers[j]
+      const cont = cust.container
+      if (!cont?.active) {
+        this._leavingCustomers.splice(j, 1)
+        continue
+      }
+      this.lerpContainerToward(cont, cust.targetX, cust.targetY, k)
+      cont.alpha = this.lerpToward(cont.alpha, 0, k)
+      if (cont.alpha < 0.04) {
+        cont.destroy()
+        this._leavingCustomers.splice(j, 1)
+      }
+    }
+
+    for (const cust of this.queue) {
+      if (cust.state !== 'walk' && cust.state !== 'queued') continue
+      const cont = cust.container
+      if (!cont?.active) continue
+      this.lerpContainerToward(cont, cust.targetX, cust.targetY, k)
+      if (this.isNearXY(cont.x, cont.y, cust.targetX, cust.targetY)) {
+        cont.x = cust.targetX
+        cont.y = cust.targetY
+        if (cust.state === 'walk') {
+          cust.state = 'queued'
+          this.updatePatienceBar(cust)
+        }
+      }
+    }
+
+    const serve = this._serveCust
+    if (serve?.container?.active) {
+      const cont = serve.container
+      const phase = serve._servePhase
+      if (phase === 'toCounter') {
+        this.lerpContainerToward(cont, serve.targetX, serve.targetY, k)
+      } else if (phase === 'toPickup') {
+        this.lerpContainerToward(cont, serve.targetX, serve.targetY, k)
+      } else if (phase === 'fadeOut') {
+        cont.alpha = this.lerpToward(cont.alpha, 0, k)
+        if (cont.alpha < 0.04) {
+          cont.destroy()
+          this._serveCust = null
+        }
+      }
+    }
   }
 
   spawnCoinBag(x, y, value) {

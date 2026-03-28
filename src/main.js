@@ -91,6 +91,13 @@ const config = {
   type: Phaser.AUTO,
   parent: 'game-container',
   backgroundColor: '#ffe8cc',
+  physics: {
+    default: 'arcade',
+    arcade: {
+      gravity: { y: 0 },
+      debug: false,
+    },
+  },
   render: {
     antialias: false,
     roundPixels: true,
