@@ -66,15 +66,8 @@ export class BaseLocationScene extends Phaser.Scene {
     this.modalBlock = false
 
     this.drawScene()
-    this.setupCounterInput()
-    this.setupButtons()
     this.scheduleSpawn()
     this.setupStaffTimer()
-
-    this.events.once('shutdown', () => {
-      if (this.spawnTimer) this.spawnTimer.remove()
-      if (this.staffEvent) this.staffEvent.remove()
-    })
 
     const pendingOffline = this.game.registry.get('pendingOfflineCoins') ?? 0
     if (pendingOffline > 0) {
@@ -137,28 +130,99 @@ export class BaseLocationScene extends Phaser.Scene {
   }
 
   drawScene() {
-    const w = this.scale.width
-    const h = this.scale.height
-    this.cameras.main.setBackgroundColor(this.theme.floor)
-
     this.bgGraphics = this.add.graphics()
-    this.drawBackground(this.bgGraphics, w, h)
+    this.counterGraphics = this.add.graphics().setDepth(2)
+    this.registerBoxGraphics = this.add.graphics().setDepth(3)
+    this.zoneGraphics = this.add.graphics().setDepth(1)
 
-    this.counterY = h * 0.52
-    this.counterX = w * 0.5
-    this.queueBaseX = w * 0.14
-    this.queueY = this.counterY
-    this.slotGap = Math.min(52, w * 0.1)
-    this.pickupX = w * 0.82
-    this.pickupY = this.counterY
+    this.scale.on('resize', this.applyLayout, this)
+    this.events.once('shutdown', () => {
+      this.scale.off('resize', this.applyLayout, this)
+      if (this.spawnTimer) this.spawnTimer.remove()
+      if (this.staffEvent) this.staffEvent.remove()
+    })
 
-    this.drawCounter(w)
-    this.drawRegister()
-    this.drawZonePads(w)
+    this.applyLayout()
 
     this.serveGlow = this.add.graphics()
     this.serveGlow.setDepth(5)
     this.serveGlow.setAlpha(0)
+  }
+
+  applyLayout() {
+    const w = this.scale.width
+    const h = this.scale.height
+    if (w < 32 || h < 32) return
+
+    this.cameras.main.setBackgroundColor(this.theme.floor)
+    this.updateLayoutMetrics(w, h)
+    this.drawBackground(this.bgGraphics, w, h)
+    this.redrawCounter()
+    this.redrawRegisterBox()
+    this.redrawZonePads()
+    this.ensureRegisterAndZoneLabels()
+    this.positionRegisterAndZoneLabels()
+    this.setupCounterInput()
+    if (!this.btnContainers) this.btnContainers = []
+    this.layoutButtons()
+    this.relayoutQueuePositions()
+  }
+
+  /**
+   * Layout-only: horizontal bands (queue | counter | pickup) and vertical centering.
+   */
+  updateLayoutMetrics(w, h) {
+    this._wallH = Math.min(h * 0.1, 72)
+    const playTop = this._wallH + 2
+    const btnReserve = 78
+    const playBottom = h - btnReserve
+    this.counterY = (playTop + playBottom) / 2
+    this.counterX = w * 0.5
+
+    const ch = 64
+    const queueStartX = Math.max(12, w * 0.03)
+    const queueMargin = 22
+    const maxCw = Math.min(166, w * 0.33)
+    const maxQueueSpan =
+      this.counterX - queueMargin - queueStartX - maxCw / 2
+    const minSpanNeeded = (MAX_QUEUE - 1) * 22
+    let cw = maxCw
+    if (maxQueueSpan < minSpanNeeded) {
+      const neededHalf =
+        this.counterX - queueMargin - queueStartX - minSpanNeeded
+      cw = Math.max(96, Math.min(maxCw, neededHalf * 2))
+    }
+    this._cw = cw
+    this._ch = ch
+    this.counterHalfW = cw / 2
+    this.counterHalfH = ch / 2
+
+    const counterLeft = this.counterX - this.counterHalfW
+    const queueRightLimit = counterLeft - queueMargin
+    const span = Math.max(48, queueRightLimit - queueStartX)
+    this.queueBaseX = queueStartX
+    this.slotGap = Math.max(22, Math.min(46, span / Math.max(1, MAX_QUEUE - 1)))
+
+    this.queueY = this.counterY
+
+    const counterRight = this.counterX + this.counterHalfW
+    this.pickupX = Phaser.Math.Clamp(
+      counterRight + Math.max(40, w * 0.11),
+      counterRight + 32,
+      w - 18,
+    )
+    this.pickupY = this.counterY
+
+    this.registerAnchorX = this.counterX
+    this.registerAnchorY = this.counterY - this.counterHalfH - 50
+
+    this._queuePadX = 6
+    this._queuePadW = Math.max(64, counterLeft - this._queuePadX - 12)
+    const spaceRight = w - this.pickupX - 8
+    this._pickupPadW = Phaser.Math.Clamp(spaceRight * 1.85, 72, w * 0.3)
+    this.queuePadCenterX = this._queuePadX + this._queuePadW / 2
+    this.pickupPadCenterX = this.pickupX
+    this._zonePadH = 86
   }
 
   drawBackground(g, w, h) {
@@ -171,81 +235,97 @@ export class BaseLocationScene extends Phaser.Scene {
       g.fillRect(0, y, w, stripe)
     }
     g.fillStyle(this.theme.wall, 1)
-    g.fillRoundedRect(0, 0, w, h * 0.22, 0)
+    g.fillRoundedRect(0, 0, w, this._wallH, 0)
   }
 
-  drawCounter(w) {
-    const g = this.add.graphics()
-    g.setDepth(2)
-    const cw = Math.min(w * 0.42, 200)
-    const ch = 72
+  redrawCounter() {
+    const g = this.counterGraphics
+    g.clear()
     const cx = this.counterX
     const cy = this.counterY
+    const cw = this._cw
+    const ch = this._ch
     g.fillStyle(this.theme.counter, 1)
     g.fillRoundedRect(cx - cw / 2, cy - ch / 2, cw, ch, 16)
     g.fillStyle(this.theme.counterTop, 1)
     g.fillRoundedRect(cx - cw / 2 - 6, cy - ch / 2 - 14, cw + 12, 22, 10)
     g.lineStyle(3, 0xffffff, 0.25)
     g.strokeRoundedRect(cx - cw / 2, cy - ch / 2, cw, ch, 16)
-    this.counterHalfW = cw / 2
-    this.counterHalfH = ch / 2
   }
 
-  drawRegister() {
-    const g = this.add.graphics()
-    g.setDepth(3)
-    const rx = this.counterX + this.counterHalfW - 28
-    const ry = this.counterY - this.counterHalfH - 6
+  redrawRegisterBox() {
+    const g = this.registerBoxGraphics
+    g.clear()
+    const rx = this.registerAnchorX
+    const ry = this.registerAnchorY
+    const rw = 72
+    const rh = 56
     g.fillStyle(this.theme.register, 1)
-    g.fillRoundedRect(rx - 36, ry - 28, 72, 56, 10)
+    g.fillRoundedRect(rx - rw / 2, ry - rh / 2, rw, rh, 10)
     g.fillStyle(0x22c55e, 1)
     g.fillRoundedRect(rx - 24, ry - 14, 48, 18, 6)
-    this.registerText = this.add
-      .text(rx, ry - 6, 'OPEN', {
-        fontFamily: 'Fredoka, system-ui, sans-serif',
-        fontSize: '11px',
-        color: '#ecfdf5',
-      })
-      .setOrigin(0.5)
-      .setDepth(4)
-    this.registerCoinLabel = this.add
-      .text(rx, ry + 14, '0', {
-        fontFamily: 'Fredoka, system-ui, sans-serif',
-        fontSize: '13px',
-        color: '#fef3c7',
-        fontStyle: '700',
-      })
-      .setOrigin(0.5)
-      .setDepth(4)
   }
 
-  drawZonePads(w) {
-    const g = this.add.graphics()
-    g.setDepth(1)
-    const padH = 100
+  ensureRegisterAndZoneLabels() {
+    if (!this.registerText) {
+      this.registerText = this.add
+        .text(0, 0, 'OPEN', {
+          fontFamily: 'Fredoka, system-ui, sans-serif',
+          fontSize: '11px',
+          color: '#ecfdf5',
+        })
+        .setOrigin(0.5)
+        .setDepth(4)
+      this.registerCoinLabel = this.add
+        .text(0, 0, '0', {
+          fontFamily: 'Fredoka, system-ui, sans-serif',
+          fontSize: '13px',
+          color: '#fef3c7',
+          fontStyle: '700',
+        })
+        .setOrigin(0.5)
+        .setDepth(4)
+    }
+    if (!this.queueZoneLabel) {
+      this.queueZoneLabel = this.add
+        .text(0, 0, 'Queue', {
+          fontFamily: 'Fredoka, system-ui, sans-serif',
+          fontSize: '14px',
+          color: '#7c2d12',
+        })
+        .setOrigin(0.5, 0)
+        .setDepth(2)
+      this.pickupZoneLabel = this.add
+        .text(0, 0, 'Pickup', {
+          fontFamily: 'Fredoka, system-ui, sans-serif',
+          fontSize: '14px',
+          color: '#7c2d12',
+        })
+        .setOrigin(0.5, 0)
+        .setDepth(2)
+    }
+  }
+
+  positionRegisterAndZoneLabels() {
+    const padH = this._zonePadH
+    const padY = this.counterY - padH / 2
+    this.registerText.setPosition(this.registerAnchorX, this.registerAnchorY - 8)
+    this.registerCoinLabel.setPosition(this.registerAnchorX, this.registerAnchorY + 12)
+    this.queueZoneLabel.setPosition(this.queuePadCenterX, padY + padH + 10)
+    this.pickupZoneLabel.setPosition(this.pickupPadCenterX, padY + padH + 10)
+  }
+
+  redrawZonePads() {
+    const g = this.zoneGraphics
+    g.clear()
+    const padH = this._zonePadH
     const padY = this.counterY - padH / 2
     g.fillStyle(this.theme.queuePad, 0.55)
-    g.fillRoundedRect(8, padY, w * 0.26, padH, 20)
+    g.fillRoundedRect(this._queuePadX, padY, this._queuePadW, padH, 18)
     g.fillStyle(this.theme.pickupPad, 0.55)
-    g.fillRoundedRect(w * 0.7 - 8, padY, w * 0.28, padH, 20)
-
-    this.add
-      .text(w * 0.17, padY + padH + 14, 'Queue', {
-        fontFamily: 'Fredoka, system-ui, sans-serif',
-        fontSize: '14px',
-        color: '#7c2d12',
-      })
-      .setOrigin(0.5, 0)
-      .setDepth(2)
-
-    this.add
-      .text(w * 0.84, padY + padH + 14, 'Pickup', {
-        fontFamily: 'Fredoka, system-ui, sans-serif',
-        fontSize: '14px',
-        color: '#7c2d12',
-      })
-      .setOrigin(0.5, 0)
-      .setDepth(2)
+    let padX = this.pickupX - this._pickupPadW / 2
+    padX = Phaser.Math.Clamp(padX, 6, this.scale.width - this._pickupPadW - 6)
+    g.fillRoundedRect(padX, padY, this._pickupPadW, padH, 18)
   }
 
   setupCounterInput() {
@@ -306,7 +386,8 @@ export class BaseLocationScene extends Phaser.Scene {
     const slot = this.queue.length
     const tx = this.queueBaseX + slot * this.slotGap
     const patience = patienceSeconds(this.getLoc().patienceUpgrades ?? 0)
-    const cust = this.makeCustomer(-40, this.queueY, patience)
+    const spawnX = Math.min(-48, -this.scale.width * 0.07)
+    const cust = this.makeCustomer(spawnX, this.queueY, patience)
     cust.targetX = tx
     cust.targetY = this.queueY
     cust.state = 'walk'
@@ -613,11 +694,6 @@ export class BaseLocationScene extends Phaser.Scene {
     }
 
     overlay.once('pointerdown', close)
-  }
-
-  setupButtons() {
-    this.btnContainers = []
-    this.layoutButtons()
   }
 
   layoutButtons() {

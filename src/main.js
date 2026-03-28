@@ -81,8 +81,10 @@ const config = {
     limit: true,
   },
   scale: {
-    mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH,
+    mode: Phaser.Scale.RESIZE,
+    parent: 'game-container',
+    autoCenter: Phaser.Scale.NO_CENTER,
+    autoRound: true,
     width: 390,
     height: 640,
   },
