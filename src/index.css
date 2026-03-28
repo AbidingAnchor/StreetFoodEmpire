@@ -7,11 +7,16 @@
 
 html,
 body,
-#root {
+#app {
   min-height: 100%;
   margin: 0;
 }
 
-#root {
+#app {
   min-height: 100svh;
+}
+
+#game-container canvas {
+  display: block;
+  margin: 0 auto;
 }
