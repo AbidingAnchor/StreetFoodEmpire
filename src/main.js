@@ -72,12 +72,32 @@ function goToLocation(loc) {
 
 let gameRef = null
 
+function isMobilePerformanceProfile() {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') return false
+  if (/Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+    return true
+  }
+  try {
+    return (
+      navigator.maxTouchPoints > 0 &&
+      window.matchMedia?.('(max-width: 768px)')?.matches === true
+    )
+  } catch {
+    return false
+  }
+}
+
 const config = {
   type: Phaser.AUTO,
   parent: 'game-container',
   backgroundColor: '#ffe8cc',
+  render: {
+    antialias: false,
+    roundPixels: true,
+    powerPreference: 'high-performance',
+  },
   fps: {
-    target: 60,
+    target: isMobilePerformanceProfile() ? 30 : 60,
     limit: true,
   },
   scale: {

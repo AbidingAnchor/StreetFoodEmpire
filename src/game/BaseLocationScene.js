@@ -37,6 +37,9 @@ const THEMES = {
 const MAX_QUEUE = 6
 const SPAWN_MIN = 3000
 const SPAWN_MAX = 5000
+const PATIENCE_TICK_MS = 100
+/** Max simulated seconds per patience tick (stall / background-tab safety). */
+const PATIENCE_DS_CAP = 1
 
 function randomPastel() {
   const hues = [0xff6b9d, 0x60a5fa, 0xa78bfa, 0x34d399, 0xfbbf24, 0xf472b6]
@@ -64,8 +67,12 @@ export class BaseLocationScene extends Phaser.Scene {
     this.persistTimer = 0
     this.counterZone = null
     this.modalBlock = false
+    this.staticRt = null
+    this.patienceTimer = null
+    this.lastPatienceTickMs = 0
 
     this.drawScene()
+    this.setupPatienceTick()
     this.scheduleSpawn()
     this.setupStaffTimer()
 
@@ -130,16 +137,16 @@ export class BaseLocationScene extends Phaser.Scene {
   }
 
   drawScene() {
-    this.bgGraphics = this.add.graphics()
-    this.counterGraphics = this.add.graphics().setDepth(2)
-    this.registerBoxGraphics = this.add.graphics().setDepth(3)
-    this.zoneGraphics = this.add.graphics().setDepth(1)
-
     this.scale.on('resize', this.applyLayout, this)
     this.events.once('shutdown', () => {
       this.scale.off('resize', this.applyLayout, this)
       if (this.spawnTimer) this.spawnTimer.remove()
       if (this.staffEvent) this.staffEvent.remove()
+      if (this.patienceTimer) this.patienceTimer.remove()
+      if (this.staticRt) {
+        this.staticRt.destroy()
+        this.staticRt = null
+      }
     })
 
     this.applyLayout()
@@ -149,6 +156,44 @@ export class BaseLocationScene extends Phaser.Scene {
     this.serveGlow.setAlpha(0)
   }
 
+  setupPatienceTick() {
+    if (this.patienceTimer) this.patienceTimer.remove()
+    this.lastPatienceTickMs = performance.now()
+    this.patienceTimer = this.time.addEvent({
+      delay: PATIENCE_TICK_MS,
+      loop: true,
+      callback: () => this.tickPatience(),
+    })
+  }
+
+  tickPatience() {
+    if (this.modalBlock) {
+      this.lastPatienceTickMs = performance.now()
+      return
+    }
+    const now = performance.now()
+    const ds = Math.min((now - this.lastPatienceTickMs) / 1000, PATIENCE_DS_CAP)
+    this.lastPatienceTickMs = now
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const cust = this.queue[i]
+      if (cust.state !== 'queued') continue
+      cust.patienceLeft -= ds
+      this.updatePatienceBar(cust)
+      if (cust.patienceLeft <= 0) {
+        this.queue.splice(i, 1)
+        this.tweens.add({
+          targets: cust.container,
+          x: cust.container.x - 120,
+          alpha: 0,
+          duration: 350,
+          ease: 'Sine.easeIn',
+          onComplete: () => cust.container.destroy(),
+        })
+        this.relayoutQueuePositions()
+      }
+    }
+  }
+
   applyLayout() {
     const w = this.scale.width
     const h = this.scale.height
@@ -156,10 +201,7 @@ export class BaseLocationScene extends Phaser.Scene {
 
     this.cameras.main.setBackgroundColor(this.theme.floor)
     this.updateLayoutMetrics(w, h)
-    this.drawBackground(this.bgGraphics, w, h)
-    this.redrawCounter()
-    this.redrawRegisterBox()
-    this.redrawZonePads()
+    this.rebuildStaticRenderTexture(w, h)
     this.ensureRegisterAndZoneLabels()
     this.positionRegisterAndZoneLabels()
     this.setupCounterInput()
@@ -225,7 +267,26 @@ export class BaseLocationScene extends Phaser.Scene {
     this._zonePadH = 86
   }
 
-  drawBackground(g, w, h) {
+  rebuildStaticRenderTexture(w, h) {
+    if (this.staticRt) {
+      this.staticRt.destroy()
+      this.staticRt = null
+    }
+
+    const g = this.make.graphics({ add: false })
+    this.paintStaticWorld(g, w, h)
+
+    this.staticRt = this.add.renderTexture(0, 0, w, h)
+    this.staticRt.setOrigin(0, 0)
+    this.staticRt.setDepth(0)
+    this.staticRt.draw(g, 0, 0)
+    g.destroy()
+  }
+
+  /**
+   * One-shot paint of floor, wall, pads, counter, register box (baked into RenderTexture).
+   */
+  paintStaticWorld(g, w, h) {
     g.clear()
     g.fillStyle(this.theme.floor, 1)
     g.fillRect(0, 0, w, h)
@@ -236,11 +297,16 @@ export class BaseLocationScene extends Phaser.Scene {
     }
     g.fillStyle(this.theme.wall, 1)
     g.fillRoundedRect(0, 0, w, this._wallH, 0)
-  }
 
-  redrawCounter() {
-    const g = this.counterGraphics
-    g.clear()
+    const padH = this._zonePadH
+    const padY = this.counterY - padH / 2
+    g.fillStyle(this.theme.queuePad, 0.55)
+    g.fillRoundedRect(this._queuePadX, padY, this._queuePadW, padH, 18)
+    g.fillStyle(this.theme.pickupPad, 0.55)
+    let padX = this.pickupX - this._pickupPadW / 2
+    padX = Phaser.Math.Clamp(padX, 6, w - this._pickupPadW - 6)
+    g.fillRoundedRect(padX, padY, this._pickupPadW, padH, 18)
+
     const cx = this.counterX
     const cy = this.counterY
     const cw = this._cw
@@ -251,11 +317,7 @@ export class BaseLocationScene extends Phaser.Scene {
     g.fillRoundedRect(cx - cw / 2 - 6, cy - ch / 2 - 14, cw + 12, 22, 10)
     g.lineStyle(3, 0xffffff, 0.25)
     g.strokeRoundedRect(cx - cw / 2, cy - ch / 2, cw, ch, 16)
-  }
 
-  redrawRegisterBox() {
-    const g = this.registerBoxGraphics
-    g.clear()
     const rx = this.registerAnchorX
     const ry = this.registerAnchorY
     const rw = 72
@@ -313,19 +375,6 @@ export class BaseLocationScene extends Phaser.Scene {
     this.registerCoinLabel.setPosition(this.registerAnchorX, this.registerAnchorY + 12)
     this.queueZoneLabel.setPosition(this.queuePadCenterX, padY + padH + 10)
     this.pickupZoneLabel.setPosition(this.pickupPadCenterX, padY + padH + 10)
-  }
-
-  redrawZonePads() {
-    const g = this.zoneGraphics
-    g.clear()
-    const padH = this._zonePadH
-    const padY = this.counterY - padH / 2
-    g.fillStyle(this.theme.queuePad, 0.55)
-    g.fillRoundedRect(this._queuePadX, padY, this._queuePadW, padH, 18)
-    g.fillStyle(this.theme.pickupPad, 0.55)
-    let padX = this.pickupX - this._pickupPadW / 2
-    padX = Phaser.Math.Clamp(padX, 6, this.scale.width - this._pickupPadW - 6)
-    g.fillRoundedRect(padX, padY, this._pickupPadW, padH, 18)
   }
 
   setupCounterInput() {
@@ -399,6 +448,7 @@ export class BaseLocationScene extends Phaser.Scene {
       ease: 'Sine.easeOut',
       onComplete: () => {
         cust.state = 'queued'
+        this.updatePatienceBar(cust)
       },
     })
   }
@@ -805,28 +855,5 @@ export class BaseLocationScene extends Phaser.Scene {
     this.queuePersist()
     this.notifyHud()
     this.layoutButtons()
-  }
-
-  update(_t, dt) {
-    if (this.modalBlock) return
-    const ds = dt / 1000
-    for (let i = this.queue.length - 1; i >= 0; i--) {
-      const cust = this.queue[i]
-      if (cust.state !== 'queued') continue
-      cust.patienceLeft -= ds
-      this.updatePatienceBar(cust)
-      if (cust.patienceLeft <= 0) {
-        this.queue.splice(i, 1)
-        this.tweens.add({
-          targets: cust.container,
-          x: cust.container.x - 120,
-          alpha: 0,
-          duration: 350,
-          ease: 'Sine.easeIn',
-          onComplete: () => cust.container.destroy(),
-        })
-        this.relayoutQueuePositions()
-      }
-    }
   }
 }
